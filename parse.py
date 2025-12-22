@@ -538,24 +538,69 @@ class Wrapper(BaseModel):
     original: Dict[str, Union[str, List, Dict]] = Field(default_factory=dict)
     references: EmbeddedReferences
 
+def get_nested_value(stix_dict: Dict[str, Any], field_path: str) -> Any:
+    """
+    Extract a value from a nested dictionary using dot notation.
+    
+    Args:
+        stix_dict: The STIX dictionary to extract from
+        field_path: Dot-separated path to the field (e.g., "extensions.availability.availability_impact")
+    
+    Returns:
+        The value at the specified path, or None if path doesn't exist
+    
+    Examples:
+        >>> get_nested_value({"name": "test"}, "name")
+        "test"
+        >>> get_nested_value({"extensions": {"availability": {"availability_impact": 99}}}, 
+        ...                  "extensions.availability.availability_impact")
+        99
+    """
+    if not field_path:
+        return None
+    
+    # Split the path into parts
+    field_parts = field_path.split(".")
+    current_value = stix_dict
+    
+    # Traverse the nested structure
+    for part in field_parts:
+        if isinstance(current_value, dict) and part in current_value:
+            current_value = current_value[part]
+        else:
+            return None
+    
+    return current_value
+
 def make_description(stix_dict: Dict[str, Union[str, Dict, List]], content: ParseContent) -> str:
     """
     Make the description string for the Wrapper.
 
     Args:
+        stix_dict: The STIX dictionary object
         content (ParseContent): The ParseContent object.
 
     Returns:
         str: The generated description string with HTML breaks between lines.
     """
     description_parts = []
+    j = 0
     for i in range(7):
         prior_string = getattr(content, f"prior_string{i}")
         post_field = getattr(content, f"post_field{i}")
-        if prior_string and post_field:
+        
+        # Handle both simple keys and dot-notation paths
+        if "." in post_field:
+            post_value = get_nested_value(stix_dict, post_field)
+        else:
+            post_value = stix_dict.get(post_field)
+        
+        # Only add to description if both prior_string and post_value exist and are not empty
+        if prior_string and post_value not in (None, "", {}):
             # Add HTML break before second and subsequent lines
-            prefix = "<br>" if i > 0 else ""
-            description_parts.append(f"{prefix}{prior_string}{stix_dict.get(post_field, {})}")
+            prefix = "<br>" if j > 0 else ""
+            description_parts.append(f"{prefix}{prior_string}{post_value}")
+            j += 1
     description = "".join(description_parts).strip()
     return description
 
@@ -598,7 +643,7 @@ def wrap_stix_dict(stix_dict: Dict[str, Union[str, Dict, List]]) -> Dict[str, Un
     wrap["id"] = stix_dict.get("id")
     wrap["type"] = stix_dict.get("type")
     wrap["icon"] = content.icon
-    wrap["name"] = stix_dict.get("name", "")
+    wrap["name"] = content.post_field0
     wrap["heading"] = content.head
     wrap["description"] = description
     wrap["object_form"] = content.form

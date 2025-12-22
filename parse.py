@@ -538,16 +538,68 @@ class Wrapper(BaseModel):
     original: Dict[str, Union[str, List, Dict]] = Field(default_factory=dict)
     references: EmbeddedReferences
 
+def parse_path_part(part: str) -> Optional[tuple[Optional[str], Optional[int]]]:
+    """
+    Parse a path segment to extract either a field name or a list index.
+    
+    ONLY supports Format 2 notation:
+    - Plain field names: "field_name" → ("field_name", None)
+    - Separate index notation: "[0]" → (None, 0)
+    
+    Invalid formats (returns None and logs error):
+    - Attached index: "field[0]", "[0]field"
+    - Empty brackets: "[]"
+    - Non-numeric index: "[abc]"
+    
+    Args:
+        part: A single path segment after splitting by "."
+        
+    Returns:
+        Tuple of (field_name, index) or None if invalid format
+        - (field_name, None) for plain field
+        - (None, index) for list index
+        - None for invalid format
+    """
+    # Check for standalone bracket notation: [N]
+    standalone_index_pattern = re.compile(r'^\[(\d+)\]$')
+    match = standalone_index_pattern.match(part)
+    
+    if match:
+        # Valid standalone index like [0], [1], etc.
+        index = int(match.group(1))
+        return (None, index)
+    
+    # Check for invalid patterns with brackets
+    if '[' in part or ']' in part:
+        # Invalid: field[0], [0]field, [], [abc], etc.
+        logger.warning(f"Invalid path notation '{part}'. Only standalone bracket notation like '[0]' is supported. "
+                      f"Use format: 'field.[0].subfield' not 'field[0].subfield'")
+        return None
+    
+    # Plain field name (no brackets)
+    return (part, None)
+
 def get_nested_value(stix_dict: Dict[str, Any], field_path: str) -> Any:
     """
-    Extract a value from a nested dictionary using dot notation.
+    Extract a value from a nested dictionary using dot notation with optional list indexing.
+    
+    Supports Format 2 notation only:
+    - Dictionary access: "extensions.availability.availability_impact"
+    - List indexing (separate): "external_references.[0].external_id"
+    - Nested lists: "extensions.ext.[0].field.[1].value"
+    
+    Invalid formats (returns None):
+    - Attached indices: "field[0]" or "tags[2]"
+    - Index before field: "[0]field"
+    - Empty brackets: "[]"
+    - Non-numeric indices: "[abc]"
     
     Args:
         stix_dict: The STIX dictionary to extract from
-        field_path: Dot-separated path to the field (e.g., "extensions.availability.availability_impact")
+        field_path: Dot-separated path (e.g., "external_references.[0].external_id")
     
     Returns:
-        The value at the specified path, or None if path doesn't exist
+        The value at the specified path, or None if path doesn't exist or is invalid
     
     Examples:
         >>> get_nested_value({"name": "test"}, "name")
@@ -555,6 +607,11 @@ def get_nested_value(stix_dict: Dict[str, Any], field_path: str) -> Any:
         >>> get_nested_value({"extensions": {"availability": {"availability_impact": 99}}}, 
         ...                  "extensions.availability.availability_impact")
         99
+        >>> get_nested_value({"external_references": [{"external_id": "CVE-2021-1234"}]}, 
+        ...                  "external_references.[0].external_id")
+        "CVE-2021-1234"
+        >>> get_nested_value({"tags": ["malware", "trojan"]}, "tags.[1]")
+        "trojan"
     """
     if not field_path:
         return None
@@ -565,10 +622,28 @@ def get_nested_value(stix_dict: Dict[str, Any], field_path: str) -> Any:
     
     # Traverse the nested structure
     for part in field_parts:
-        if isinstance(current_value, dict) and part in current_value:
-            current_value = current_value[part]
-        else:
+        # Parse the part to get field name and/or index
+        parsed = parse_path_part(part)
+        
+        if parsed is None:
+            # Invalid format detected
             return None
+        
+        field_name, index = parsed
+        
+        # Handle field access (dictionary key)
+        if field_name is not None:
+            if isinstance(current_value, dict) and field_name in current_value:
+                current_value = current_value[field_name]
+            else:
+                return None
+        
+        # Handle list index access
+        if index is not None:
+            if isinstance(current_value, list) and 0 <= index < len(current_value):
+                current_value = current_value[index]
+            else:
+                return None
     
     return current_value
 
@@ -643,7 +718,7 @@ def wrap_stix_dict(stix_dict: Dict[str, Union[str, Dict, List]]) -> Dict[str, Un
     wrap["id"] = stix_dict.get("id")
     wrap["type"] = stix_dict.get("type")
     wrap["icon"] = content.icon
-    wrap["name"] = content.post_field0
+    wrap["name"] = stix_dict.get(content.post_field0, "")
     wrap["heading"] = content.head
     wrap["description"] = description
     wrap["object_form"] = content.form
